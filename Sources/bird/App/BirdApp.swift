@@ -28,7 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let view = FloatingBarView(recorder: recorder)
         let panel = FloatingPanel(contentView: view)
         panel.centerAtBottom()
-        panel.orderFront(nil)
+        panel.makeKeyAndOrderFront(nil)
         toolbarPanel = panel
     }
 
@@ -73,7 +73,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recorder.$isRecording
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isRecording in
-                self?.updateToolbarFrame(isRecording: isRecording)
+                guard let self else { return }
+                self.updateToolbarFrame(isRecording: isRecording)
+                // Hide the camera bubble while recording to avoid capturing it twice
+                if isRecording {
+                    self.cameraPanel?.orderOut(nil)
+                } else if self.recorder.captureCamera {
+                    self.cameraPanel?.orderFront(nil)
+                }
             }
             .store(in: &cancellables)
 
@@ -81,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] captureCamera in
                 guard let self else { return }
+                guard !self.recorder.isRecording else { return }
                 if captureCamera {
                     self.cameraPanel?.orderFront(nil)
                 } else {
@@ -95,14 +103,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let visible = screen.visibleFrame
         let newFrame: NSRect
         if isRecording {
-            let width: CGFloat = 156
-            let height: CGFloat = 58
+            let width: CGFloat = 140
+            let height: CGFloat = 48
             let x = visible.midX - width / 2
             let y = visible.minY + 24
             newFrame = NSRect(x: x, y: y, width: width, height: height)
         } else {
-            let width: CGFloat = 836
-            let height: CGFloat = 70
+            let width: CGFloat = 860
+            let height: CGFloat = 68
             let x = visible.midX - width / 2
             let y = visible.minY + 24
             newFrame = NSRect(x: x, y: y, width: width, height: height)

@@ -18,8 +18,8 @@ final class ScreenRecorder: NSObject, ObservableObject {
     @Published var selectedSourceID: String = ""
 
     @Published var captureSystemAudio: Bool = true
-    @Published var captureMicrophone: Bool = false
-    @Published var captureCamera: Bool = false {
+    @Published var captureMicrophone: Bool = true
+    @Published var captureCamera: Bool = true {
         didSet { updateCameraPreview() }
     }
 
@@ -142,10 +142,14 @@ final class ScreenRecorder: NSObject, ObservableObject {
         if captureSystemAudio {
             try await stream.addStreamOutput(handler, type: .audio, sampleHandlerQueue: outputQueue)
         }
-        try await stream.startCapture()
 
-        statusText = "Recording"
+        // Signal recording start before capture begins so the camera bubble
+        // panel has time to hide before the first frame is captured.
         isRecording = true
+        try? await Task.sleep(nanoseconds: 150_000_000) // 0.15s
+
+        try await stream.startCapture()
+        statusText = "Recording"
     }
 
     func stopRecordingAndExport() async throws {
@@ -164,18 +168,13 @@ final class ScreenRecorder: NSObject, ObservableObject {
 
         await finishWriting()
 
-        statusText = "Exporting"
+        statusText = "Saving"
         if let outputURL {
-            if let saveURL = try await promptSaveURL(defaultName: "ScreenRecording.mp4") {
-                if FileManager.default.fileExists(atPath: saveURL.path) {
-                    try FileManager.default.removeItem(at: saveURL)
-                }
-                try FileManager.default.copyItem(at: outputURL, to: saveURL)
-                statusText = "Saved to \(saveURL.lastPathComponent)"
-            } else {
-                statusText = "Export cancelled"
-            }
+            let saveURL = try autoSaveURL()
+            try FileManager.default.copyItem(at: outputURL, to: saveURL)
             try? FileManager.default.removeItem(at: outputURL)
+            statusText = "Saved to \(saveURL.lastPathComponent)"
+            NSWorkspace.shared.activateFileViewerSelecting([saveURL])
         }
     }
 
@@ -373,8 +372,28 @@ final class ScreenRecorder: NSObject, ObservableObject {
             let margin: CGFloat = 24
             let x = screenExtent.maxX - scaledCamera.extent.width - margin
             let y = screenExtent.minY + margin
-            let positionedCamera = scaledCamera.transformed(by: CGAffineTransform(translationX: x, y: y))
 
+            // Circular mask via CIRadialGradient
+            let extent = scaledCamera.extent
+            let radius = min(extent.width, extent.height) / 2
+            let center = CIVector(x: extent.midX, y: extent.midY)
+            let circularCamera: CIImage
+            if let gradientFilter = CIFilter(name: "CIRadialGradient") {
+                gradientFilter.setValue(center, forKey: "inputCenter")
+                gradientFilter.setValue(radius - 1, forKey: "inputRadius0")
+                gradientFilter.setValue(radius,     forKey: "inputRadius1")
+                gradientFilter.setValue(CIColor.white, forKey: "inputColor0")
+                gradientFilter.setValue(CIColor.clear, forKey: "inputColor1")
+                let mask = gradientFilter.outputImage!.cropped(to: extent)
+                circularCamera = scaledCamera.applyingFilter("CIBlendWithMask", parameters: [
+                    "inputBackgroundImage": CIImage(color: .clear).cropped(to: extent),
+                    "inputMaskImage": mask
+                ])
+            } else {
+                circularCamera = scaledCamera
+            }
+
+            let positionedCamera = circularCamera.transformed(by: CGAffineTransform(translationX: x, y: y))
             composed = positionedCamera.composited(over: screenImage)
         }
 
@@ -420,23 +439,14 @@ final class ScreenRecorder: NSObject, ObservableObject {
         adaptor = nil
     }
 
-    private func promptSaveURL(defaultName: String) async throws -> URL? {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.main.async {
-                let panel = NSSavePanel()
-                panel.allowedContentTypes = [.mpeg4Movie]
-                panel.nameFieldStringValue = defaultName
-                panel.canCreateDirectories = true
-
-                panel.begin { response in
-                    if response == .OK {
-                        continuation.resume(returning: panel.url)
-                    } else {
-                        continuation.resume(returning: nil)
-                    }
-                }
-            }
-        }
+    private func autoSaveURL() throws -> URL {
+        let docs = try FileManager.default.url(
+            for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+        )
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        let name = "Screen Recording \(formatter.string(from: Date())).mp4"
+        return docs.appendingPathComponent(name)
     }
 }
 

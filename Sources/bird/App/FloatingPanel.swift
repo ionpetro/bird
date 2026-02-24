@@ -5,16 +5,14 @@ final class FloatingPanel: NSPanel {
     init<V: View>(contentView: V) {
         let hosting = NSHostingView(rootView: contentView)
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 836, height: 70),
-            styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 68),
+            styleMask: [.nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
         self.contentView = hosting
         isFloatingPanel = true
         level = .floating
-        titleVisibility = .hidden
-        titlebarAppearsTransparent = true
         isMovableByWindowBackground = true
         backgroundColor = .clear
         hasShadow = true
@@ -22,6 +20,9 @@ final class FloatingPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         hidesOnDeactivate = false
     }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 
     func centerAtBottom() {
         guard let screen = NSScreen.main else { return }

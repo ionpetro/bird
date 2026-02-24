@@ -1,9 +1,40 @@
 import SwiftUI
+import AppKit
+
+// MARK: – Hover effect modifier
+
+private struct HoverModifier: ViewModifier {
+    @State private var isHovered = false
+
+    func body(content: Content) -> some View {
+        content
+            .brightness(isHovered ? 0.08 : 0)
+            .scaleEffect(isHovered ? 1.04 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+            .onHover { hovering in
+                isHovered = hovering
+                hovering ? NSCursor.pointingHand.push() : NSCursor.pop()
+            }
+    }
+}
+
+private extension View {
+    func hoverEffect() -> some View { modifier(HoverModifier()) }
+
+    /// Cursor only — for controls (menus/toggles) that have their own hover visuals.
+    func pointerCursor() -> some View {
+        onHover { hovering in
+            hovering ? NSCursor.pointingHand.push() : NSCursor.pop()
+        }
+    }
+}
+
+// MARK: – Floating bar
 
 struct FloatingBarView: View {
     @ObservedObject var recorder: ScreenRecorder
     @State private var selectedSourceKind: CaptureSourceKind = .display
-    @State private var errorText: String?
+    @State private var countdown: Int? = nil
 
     var body: some View {
         ZStack {
@@ -14,30 +45,21 @@ struct FloatingBarView: View {
             }
         }
         .animation(.spring(duration: 0.25), value: recorder.isRecording)
-        .alert("Error", isPresented: Binding(
-            get: { errorText != nil },
-            set: { if !$0 { errorText = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(errorText ?? "")
-        }
     }
 
     // MARK: – Full toolbar
 
     private var fullBar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 16) {
             // Quit button
-            Button {
-                NSApp.terminate(nil)
-            } label: {
+            Button { NSApp.terminate(nil) } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .semibold))
                     .frame(width: 28, height: 28)
                     .background(Circle().fill(Color.primary.opacity(0.08)))
             }
             .buttonStyle(.plain)
+            .hoverEffect()
 
             divider
 
@@ -49,22 +71,16 @@ struct FloatingBarView: View {
 
             divider
 
-            // Camera picker
-            cameraMenu
-
-            // Mic picker
-            micMenu
-
-            // System audio
-            systemAudioButton
+            cameraMenu.pointerCursor()
+            micMenu.pointerCursor()
+            systemAudioButton.pointerCursor()
 
             Spacer()
 
-            // Record button
             recordButton
         }
-        .padding(.horizontal, 14)
-        .frame(height: 54)
+        .padding(.horizontal, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 18)
                 .fill(.ultraThinMaterial)
@@ -72,9 +88,7 @@ struct FloatingBarView: View {
                     RoundedRectangle(cornerRadius: 18)
                         .stroke(Color.white.opacity(0.12), lineWidth: 1)
                 )
-                .shadow(radius: 16, y: 4)
         )
-        .padding(8)
         .onAppear {
             Task { await recorder.reloadSources() }
         }
@@ -98,6 +112,7 @@ struct FloatingBarView: View {
             .background(Capsule().fill(Color.red))
         }
         .buttonStyle(.plain)
+        .hoverEffect()
     }
 
     // MARK: – Sub-views
@@ -124,6 +139,7 @@ struct FloatingBarView: View {
                 )
         }
         .buttonStyle(.plain)
+        .hoverEffect()
     }
 
     private var cameraMenu: some View {
@@ -139,9 +155,12 @@ struct FloatingBarView: View {
                 .disabled(!recorder.captureCamera)
             }
         } label: {
-            Label(truncated(recorder.availableCameras.first(where: { $0.id == recorder.selectedCameraID })?.name ?? "Camera"), systemImage: "camera")
-                .font(.system(size: 12))
-                .foregroundColor(recorder.captureCamera ? .primary : .secondary)
+            Label(
+                truncated(recorder.availableCameras.first(where: { $0.id == recorder.selectedCameraID })?.name ?? "Camera"),
+                systemImage: "camera"
+            )
+            .font(.system(size: 12))
+            .foregroundColor(recorder.captureCamera ? .primary : .secondary)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -160,9 +179,12 @@ struct FloatingBarView: View {
                 .disabled(!recorder.captureMicrophone)
             }
         } label: {
-            Label(truncated(recorder.availableMicrophones.first(where: { $0.id == recorder.selectedMicrophoneID })?.name ?? "Mic"), systemImage: "mic")
-                .font(.system(size: 12))
-                .foregroundColor(recorder.captureMicrophone ? .primary : .secondary)
+            Label(
+                truncated(recorder.availableMicrophones.first(where: { $0.id == recorder.selectedMicrophoneID })?.name ?? "Mic"),
+                systemImage: "mic"
+            )
+            .font(.system(size: 12))
+            .foregroundColor(recorder.captureMicrophone ? .primary : .secondary)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -180,21 +202,38 @@ struct FloatingBarView: View {
 
     private var recordButton: some View {
         Button {
+            guard countdown == nil else { return }
             Task { await startRecording() }
         } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: 8, height: 8)
-                Text("Record")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white)
+            ZStack {
+                if let n = countdown {
+                    Text("\(n)")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+                        .id(n) // triggers transition on change
+                        .transition(.asymmetric(
+                            insertion: .scale(scale: 1.4).combined(with: .opacity),
+                            removal: .scale(scale: 0.6).combined(with: .opacity)
+                        ))
+                } else {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 8, height: 8)
+                        Text("Record")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.white)
+                    }
+                    .transition(.opacity)
+                }
             }
+            .animation(.easeInOut(duration: 0.2), value: countdown)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background(Capsule().fill(Color.red))
         }
         .buttonStyle(.plain)
+        .hoverEffect()
     }
 
     // MARK: – Helpers
@@ -203,11 +242,29 @@ struct FloatingBarView: View {
         name.count > maxLength ? String(name.prefix(maxLength - 1)) + "…" : name
     }
 
+    private func showError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Recording Error"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
     private func startRecording() async {
+        if recorder.availableSources.isEmpty {
+            await recorder.reloadSources()
+        }
+        // 3-second countdown
+        for i in stride(from: 3, through: 1, by: -1) {
+            countdown = i
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        countdown = nil
         do {
             try await recorder.startRecording()
         } catch {
-            errorText = error.localizedDescription
+            showError(error.localizedDescription)
         }
     }
 
@@ -215,7 +272,7 @@ struct FloatingBarView: View {
         do {
             try await recorder.stopRecordingAndExport()
         } catch {
-            errorText = error.localizedDescription
+            showError(error.localizedDescription)
         }
     }
 }
