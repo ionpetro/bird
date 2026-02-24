@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>bird</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.bird.app</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Camera access is required to record a picture-in-picture overlay.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Microphone access is required to record your voice.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Screen recording access is required to capture your display or window.</string>
+</dict>
+</plist>
