@@ -105,7 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if isRecording {
             let width: CGFloat = 140
             let height: CGFloat = 48
-            let x = visible.midX - width / 2
+            let x = visible.minX + 24
             let y = visible.minY + 24
             newFrame = NSRect(x: x, y: y, width: width, height: height)
         } else {
