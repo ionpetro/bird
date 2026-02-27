@@ -259,12 +259,19 @@ struct FloatingBarView: View {
                 Text("Stop").font(.system(size: 14, weight: .semibold)).foregroundColor(.white)
             }
             .padding(.horizontal, 18).padding(.vertical, 10)
-            .background(Capsule().fill(.ultraThinMaterial))
-            .overlay(Capsule().stroke(Color.primary.opacity(0.09), lineWidth: 0.5))
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color(red: 0.19, green: 0.57, blue: 0.52).opacity(0.95))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color.white.opacity(0.30), lineWidth: 1)
+            )
+            .clipShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
-        .hoverEffect()
-        .shadow(color: .black.opacity(0.3), radius: 12, x: 0, y: 4)
+        .pointerCursor()
+        .shadow(color: .black.opacity(0.35), radius: 12, x: 0, y: 4)
     }
 
     // MARK: – Recent recording strip
