@@ -4,6 +4,7 @@ import Combine
 import ScreenCaptureKit
 import AVFoundation
 import CoreImage
+import Foundation
 
 final class ScreenRecorder: NSObject, ObservableObject {
     @Published var availableSources: [CaptureSource] = []
@@ -13,6 +14,9 @@ final class ScreenRecorder: NSObject, ObservableObject {
     @Published var statusText: String = "Idle"
     @Published var isWriting: Bool = false
     @Published var isRecording: Bool = false
+    @Published var lastRecordingArtifacts: RecordingArtifacts?
+    @Published var availableExportPresets: [ExportPreset] = ExportPreset.defaults
+    @Published var selectedExportPresetID: String = ExportPreset.defaults.first?.id ?? "balanced"
 
     var selectedSourceKind: CaptureSourceKind = .display
     @Published var selectedSourceID: String = ""
@@ -42,6 +46,20 @@ final class ScreenRecorder: NSObject, ObservableObject {
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var writerStartTime: CMTime?
     private var outputURL: URL?
+    private var captureSessionStartedAt: Date?
+    private var captureEvents: [CaptureEvent] = []
+    private var captureTimelineOffsetSeconds: Double = 0
+    private var captureTargetRect: CGRect?
+    private var captureTargetKind: CaptureSourceKind = .display
+    private var captureMonitorCapabilities = CaptureMonitorCapabilities(mouseClickMonitor: false, mouseMoveMonitor: false, keyboardMonitor: false)
+    private var hasLimitedCaptureTelemetry: Bool = false
+    private var lastMouseMoveEventTime: TimeInterval = 0
+    private let captureEventsQueue = DispatchQueue(label: "capture.events.queue")
+    private var globalLeftClickMonitor: Any?
+    private var globalRightClickMonitor: Any?
+    private var globalMouseMoveMonitor: Any?
+    private var globalKeyDownMonitor: Any?
+    private var localKeyDownMonitor: Any?
 
     let cameraManager = CameraManager()
     private let microphoneManager = MicrophoneManager()
@@ -74,12 +92,12 @@ final class ScreenRecorder: NSObject, ObservableObject {
 
     func requestPermissions() async {
         if AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            _ = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                 AVCaptureDevice.requestAccess(for: .video) { continuation.resume(returning: $0) }
             }
         }
         if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            _ = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                 AVCaptureDevice.requestAccess(for: .audio) { continuation.resume(returning: $0) }
             }
         }
@@ -116,7 +134,8 @@ final class ScreenRecorder: NSObject, ObservableObject {
 
         let configuration = SCStreamConfiguration()
         configuration.queueDepth = 6
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+        let exportPreset = activeExportPreset()
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(exportPreset.frameRate))
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.capturesAudio = captureSystemAudio
         configuration.excludesCurrentProcessAudio = true
@@ -127,29 +146,40 @@ final class ScreenRecorder: NSObject, ObservableObject {
             configuration.height = Int(targetSize.height)
         }
 
-        try prepareWriter(configuration: configuration)
-        try await startAuxiliaryCapture()
+        do {
+            try prepareWriter(configuration: configuration, preset: exportPreset)
+            try startAuxiliaryCapture()
+            beginCaptureEventTracking()
 
-        let handler = ScreenStreamOutputHandler { [weak self] sampleBuffer, type in
-            self?.handleStreamSampleBuffer(sampleBuffer, type: type)
+            let handler = ScreenStreamOutputHandler { [weak self] sampleBuffer, type in
+                self?.handleStreamSampleBuffer(sampleBuffer, type: type)
+            }
+            streamOutput = handler
+
+            let stream = SCStream(filter: contentFilter, configuration: configuration, delegate: nil)
+            self.stream = stream
+
+            try stream.addStreamOutput(handler, type: .screen, sampleHandlerQueue: outputQueue)
+            if captureSystemAudio {
+                try stream.addStreamOutput(handler, type: .audio, sampleHandlerQueue: outputQueue)
+            }
+
+            // Signal recording start before capture begins so the camera bubble
+            // panel has time to hide before the first frame is captured.
+            isRecording = true
+            try? await Task.sleep(nanoseconds: 150_000_000) // 0.15s
+
+            try await stream.startCapture()
+            statusText = hasLimitedCaptureTelemetry ? "Recording (limited telemetry)" : "Recording"
+        } catch {
+            isRecording = false
+            endCaptureEventTracking()
+            self.stream = nil
+            streamOutput = nil
+            microphoneManager.stop()
+            await finishWriting()
+            throw error
         }
-        streamOutput = handler
-
-        let stream = SCStream(filter: contentFilter, configuration: configuration, delegate: nil)
-        self.stream = stream
-
-        try await stream.addStreamOutput(handler, type: .screen, sampleHandlerQueue: outputQueue)
-        if captureSystemAudio {
-            try await stream.addStreamOutput(handler, type: .audio, sampleHandlerQueue: outputQueue)
-        }
-
-        // Signal recording start before capture begins so the camera bubble
-        // panel has time to hide before the first frame is captured.
-        isRecording = true
-        try? await Task.sleep(nanoseconds: 150_000_000) // 0.15s
-
-        try await stream.startCapture()
-        statusText = "Recording"
     }
 
     func stopRecordingAndExport() async throws {
@@ -157,25 +187,50 @@ final class ScreenRecorder: NSObject, ObservableObject {
         isRecording = false
         statusText = "Finishing"
 
-        try await stream.stopCapture()
-        self.stream = nil
-        streamOutput = nil
-
-        if !captureCamera {
-            cameraManager.stop()
+        defer {
+            self.stream = nil
+            streamOutput = nil
+            endCaptureEventTracking()
+            if !captureCamera {
+                cameraManager.stop()
+            }
+            microphoneManager.stop()
         }
-        microphoneManager.stop()
+
+        try await stream.stopCapture()
 
         await finishWriting()
 
         statusText = "Saving"
-        if let outputURL {
-            let saveURL = try autoSaveURL()
-            try FileManager.default.copyItem(at: outputURL, to: saveURL)
-            try? FileManager.default.removeItem(at: outputURL)
-            statusText = "Saved to \(saveURL.lastPathComponent)"
-            NSWorkspace.shared.activateFileViewerSelecting([saveURL])
+        if let tempURL = outputURL {
+            let finalURL: URL
+            if let saveURL = try? autoSaveURL(for: activeExportPreset()) {
+                do {
+                    try FileManager.default.moveItem(at: tempURL, to: saveURL)
+                    finalURL = saveURL
+                } catch {
+                    finalURL = tempURL
+                }
+            } else {
+                finalURL = tempURL
+            }
+            let sidecars = try? writeCaptureMetadataSidecar(for: finalURL)
+            lastRecordingArtifacts = RecordingArtifacts(
+                videoURL: finalURL,
+                eventsURL: sidecars?.eventsURL,
+                timelineURL: sidecars?.timelineURL,
+                savedAt: Date()
+            )
+            statusText = "Saved to \(finalURL.lastPathComponent)"
         }
+    }
+
+    func clearLastRecordingArtifacts() {
+        lastRecordingArtifacts = nil
+    }
+
+    func activeExportPreset() -> ExportPreset {
+        availableExportPresets.first(where: { $0.id == selectedExportPresetID }) ?? ExportPreset.defaults[0]
     }
 
     private func updateAvailableSources() {
@@ -231,15 +286,16 @@ final class ScreenRecorder: NSObject, ObservableObject {
         }
     }
 
-    private func prepareWriter(configuration: SCStreamConfiguration) throws {
+    private func prepareWriter(configuration: SCStreamConfiguration, preset: ExportPreset) throws {
         let width = configuration.width > 0 ? configuration.width : 1920
         let height = configuration.height > 0 ? configuration.height : 1080
 
         let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("bird-\(UUID().uuidString).mp4")
+            .appendingPathComponent("bird-\(UUID().uuidString)")
+            .appendingPathExtension(preset.format.rawValue)
         self.outputURL = outputURL
 
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: preset.format.fileType)
 
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
@@ -251,7 +307,15 @@ final class ScreenRecorder: NSObject, ObservableObject {
             ]
         ]
 
-        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        let computedBitrate = max(width * height * preset.bitRateMultiplier, 2_000_000)
+        var compression = (videoSettings[AVVideoCompressionPropertiesKey] as? [String: Any]) ?? [:]
+        compression[AVVideoAverageBitRateKey] = computedBitrate
+        compression[AVVideoExpectedSourceFrameRateKey] = preset.frameRate
+
+        var finalVideoSettings = videoSettings
+        finalVideoSettings[AVVideoCompressionPropertiesKey] = compression
+
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: finalVideoSettings)
         videoInput.expectsMediaDataInRealTime = true
 
         let attributes: [String: Any] = [
@@ -262,11 +326,17 @@ final class ScreenRecorder: NSObject, ObservableObject {
         ]
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput, sourcePixelBufferAttributes: attributes)
 
+        guard writer.canAdd(videoInput) else {
+            throw CaptureError.writerConfiguration("Video settings are not supported for \(preset.format.rawValue)")
+        }
         writer.add(videoInput)
 
         if captureSystemAudio {
             let systemAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings())
             systemAudioInput.expectsMediaDataInRealTime = true
+            guard writer.canAdd(systemAudioInput) else {
+                throw CaptureError.writerConfiguration("System audio settings are not supported for \(preset.format.rawValue)")
+            }
             writer.add(systemAudioInput)
             self.systemAudioInput = systemAudioInput
         }
@@ -274,6 +344,9 @@ final class ScreenRecorder: NSObject, ObservableObject {
         if captureMicrophone {
             let micAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings())
             micAudioInput.expectsMediaDataInRealTime = true
+            guard writer.canAdd(micAudioInput) else {
+                throw CaptureError.writerConfiguration("Microphone settings are not supported for \(preset.format.rawValue)")
+            }
             writer.add(micAudioInput)
             self.micAudioInput = micAudioInput
         }
@@ -316,6 +389,11 @@ final class ScreenRecorder: NSObject, ObservableObject {
             let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             writer.startSession(atSourceTime: timestamp)
             writerStartTime = timestamp
+            captureEventsQueue.sync {
+                if let startedAt = captureSessionStartedAt {
+                    captureTimelineOffsetSeconds = max(0, Date().timeIntervalSince(startedAt))
+                }
+            }
         }
 
         switch type {
@@ -323,6 +401,8 @@ final class ScreenRecorder: NSObject, ObservableObject {
             handleScreenSample(sampleBuffer)
         case .audio:
             handleSystemAudioSample(sampleBuffer)
+        case .microphone:
+            return
         @unknown default:
             return
         }
@@ -439,14 +519,205 @@ final class ScreenRecorder: NSObject, ObservableObject {
         adaptor = nil
     }
 
-    private func autoSaveURL() throws -> URL {
+    private func autoSaveURL(for preset: ExportPreset) throws -> URL {
         let docs = try FileManager.default.url(
             for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true
         )
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        let name = "Screen Recording \(formatter.string(from: Date())).mp4"
+        let name = "Screen Recording \(formatter.string(from: Date())).\(preset.format.rawValue)"
         return docs.appendingPathComponent(name)
+    }
+
+    private func beginCaptureEventTracking() {
+        captureEventsQueue.sync {
+            captureSessionStartedAt = Date()
+            captureEvents = []
+            captureTimelineOffsetSeconds = 0
+            captureTargetKind = selectedSourceKind
+            captureTargetRect = currentCaptureTargetRect()
+            captureMonitorCapabilities = CaptureMonitorCapabilities(mouseClickMonitor: false, mouseMoveMonitor: false, keyboardMonitor: false)
+            lastMouseMoveEventTime = 0
+        }
+
+        globalLeftClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
+            self?.appendCaptureEvent(kind: .leftClick, event: event)
+        }
+        globalRightClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.rightMouseDown]) { [weak self] event in
+            self?.appendCaptureEvent(kind: .rightClick, event: event)
+        }
+        globalMouseMoveMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged]) { [weak self] event in
+            self?.appendCaptureEvent(kind: .mouseMove, event: event)
+        }
+        globalKeyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            self?.appendKeyboardEvent(event: event)
+        }
+        localKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            self?.appendKeyboardEvent(event: event)
+            return event
+        }
+
+        captureEventsQueue.sync {
+            captureMonitorCapabilities = CaptureMonitorCapabilities(
+                mouseClickMonitor: globalLeftClickMonitor != nil && globalRightClickMonitor != nil,
+                mouseMoveMonitor: globalMouseMoveMonitor != nil,
+                keyboardMonitor: globalKeyDownMonitor != nil || localKeyDownMonitor != nil
+            )
+            hasLimitedCaptureTelemetry = !captureMonitorCapabilities.mouseClickMonitor || !captureMonitorCapabilities.mouseMoveMonitor || !captureMonitorCapabilities.keyboardMonitor
+        }
+    }
+
+    private func endCaptureEventTracking() {
+        if let monitor = globalLeftClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalLeftClickMonitor = nil
+        }
+        if let monitor = globalRightClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalRightClickMonitor = nil
+        }
+        if let monitor = globalMouseMoveMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalMouseMoveMonitor = nil
+        }
+        if let monitor = globalKeyDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalKeyDownMonitor = nil
+        }
+        if let monitor = localKeyDownMonitor {
+            NSEvent.removeMonitor(monitor)
+            localKeyDownMonitor = nil
+        }
+    }
+
+    private func appendCaptureEvent(kind: CaptureEventKind, event: NSEvent) {
+        let globalLocation = NSEvent.mouseLocation
+        captureEventsQueue.async { [weak self] in
+            guard let self, let startedAt = self.captureSessionStartedAt else { return }
+            guard let targetRect = self.captureTargetRect, targetRect.width > 0, targetRect.height > 0 else { return }
+
+            if kind == .mouseMove {
+                let now = event.timestamp
+                guard now - self.lastMouseMoveEventTime >= (1.0 / 30.0) else { return }
+                self.lastMouseMoveEventTime = now
+            }
+
+            let normalizedX = min(max((globalLocation.x - targetRect.minX) / targetRect.width, 0), 1)
+            let normalizedY = min(max((globalLocation.y - targetRect.minY) / targetRect.height, 0), 1)
+
+            self.captureEvents.append(CaptureEvent(
+                kind: kind,
+                timestampSeconds: Date().timeIntervalSince(startedAt),
+                x: normalizedX,
+                y: normalizedY,
+                keyCode: nil,
+                characters: nil,
+                modifierFlags: nil
+            ))
+        }
+    }
+
+    private func appendKeyboardEvent(event: NSEvent) {
+        let globalLocation = NSEvent.mouseLocation
+        captureEventsQueue.async { [weak self] in
+            guard let self, let startedAt = self.captureSessionStartedAt else { return }
+            guard let targetRect = self.captureTargetRect, targetRect.width > 0, targetRect.height > 0 else { return }
+
+            let normalizedX = min(max((globalLocation.x - targetRect.minX) / targetRect.width, 0), 1)
+            let normalizedY = min(max((globalLocation.y - targetRect.minY) / targetRect.height, 0), 1)
+
+            self.captureEvents.append(CaptureEvent(
+                kind: .keyDown,
+                timestampSeconds: Date().timeIntervalSince(startedAt),
+                x: normalizedX,
+                y: normalizedY,
+                keyCode: event.keyCode,
+                characters: event.charactersIgnoringModifiers,
+                modifierFlags: event.modifierFlags.rawValue
+            ))
+        }
+    }
+
+    private func writeCaptureMetadataSidecar(for savedVideoURL: URL) throws -> (eventsURL: URL, timelineURL: URL) {
+        let snapshot = captureEventsQueue.sync {
+            (
+                startedAt: captureSessionStartedAt,
+                events: captureEvents,
+                targetRect: captureTargetRect,
+                targetKind: captureTargetKind,
+                timelineOffsetSeconds: captureTimelineOffsetSeconds,
+                monitorCapabilities: captureMonitorCapabilities
+            )
+        }
+
+        guard let startedAt = snapshot.startedAt else {
+            throw CaptureError.writerConfiguration("Missing capture session metadata")
+        }
+        defer {
+            captureEventsQueue.sync {
+                captureSessionStartedAt = nil
+                captureEvents = []
+                captureTargetRect = nil
+                captureTimelineOffsetSeconds = 0
+                hasLimitedCaptureTelemetry = false
+            }
+        }
+
+        let target = snapshot.targetKind == .display ? "display" : "window"
+        let rect = snapshot.targetRect.map {
+            CaptureTargetRect(x: $0.origin.x, y: $0.origin.y, width: $0.width, height: $0.height)
+        }
+
+        let metadata = CaptureSessionMetadata(
+            startedAtISO8601: ISO8601DateFormatter().string(from: startedAt),
+            target: target,
+            coordinateSpace: "normalized_capture_target_bottom_left_origin",
+            targetRect: rect,
+            timelineOffsetSeconds: snapshot.timelineOffsetSeconds,
+            monitorCapabilities: snapshot.monitorCapabilities,
+            events: snapshot.events
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(metadata)
+        let metadataURL = savedVideoURL.deletingPathExtension().appendingPathExtension("events.json")
+        try data.write(to: metadataURL, options: Data.WritingOptions.atomic)
+
+        let timelineURL = try writeDraftTimelineSidecar(for: savedVideoURL, eventsURL: metadataURL, metadata: metadata)
+        return (metadataURL, timelineURL)
+    }
+
+    private func writeDraftTimelineSidecar(for savedVideoURL: URL, eventsURL: URL, metadata: CaptureSessionMetadata) throws -> URL {
+        let project = ZoomTimelineGenerator.makeDraftProject(
+            metadata: metadata,
+            sourceEventsFileName: eventsURL.lastPathComponent
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(project)
+        let timelineURL = savedVideoURL.deletingPathExtension().appendingPathExtension("timeline.json")
+        try data.write(to: timelineURL, options: Data.WritingOptions.atomic)
+        return timelineURL
+    }
+
+    private func currentCaptureTargetRect() -> CGRect? {
+        switch selectedSourceKind {
+        case .display:
+            guard let display = displayMap[selectedSourceID] else { return nil }
+            return displayRect(for: display)
+        case .window:
+            return windowMap[selectedSourceID]?.frame
+        }
+    }
+
+    private func displayRect(for display: SCDisplay) -> CGRect? {
+        NSScreen.screens.first { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return false
+            }
+            return CGDirectDisplayID(number.uint32Value) == display.displayID
+        }?.frame
     }
 }
 
@@ -465,6 +736,7 @@ final class ScreenStreamOutputHandler: NSObject, SCStreamOutput {
 enum CaptureError: LocalizedError {
     case invalidSelection
     case deviceNotFound(String)
+    case writerConfiguration(String)
 
     var errorDescription: String? {
         switch self {
@@ -472,6 +744,8 @@ enum CaptureError: LocalizedError {
             return "Please select a valid display or window to record."
         case .deviceNotFound(let name):
             return "\(name) not found. Check device permissions."
+        case .writerConfiguration(let message):
+            return message
         }
     }
 }

@@ -8,10 +8,11 @@ struct BirdApp: App {
     var body: some Scene { Settings { EmptyView() } }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let recorder = ScreenRecorder()
     var toolbarPanel: FloatingPanel?
     var cameraPanel: NSPanel?
+    var editorWindow: NSWindow?
     var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -96,6 +97,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             .store(in: &cancellables)
+
+        recorder.$lastRecordingArtifacts
+            .receive(on: DispatchQueue.main)
+            .compactMap { $0 }
+            .sink { [weak self] artifacts in
+                self?.presentEditorWindow(for: artifacts)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func presentEditorWindow(for artifacts: RecordingArtifacts) {
+        let editorView = RecordingEditorView(artifacts: artifacts)
+        let host = NSHostingView(rootView: editorView)
+
+        let frame = NSRect(x: 0, y: 0, width: 1280, height: 800)
+        let window: NSWindow
+        if let existing = editorWindow {
+            window = existing
+            window.contentView = host
+        } else {
+            window = NSWindow(
+                contentRect: frame,
+                styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Bird"
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isReleasedWhenClosed = false
+            window.center()
+            window.contentView = host
+            window.delegate = self
+            editorWindow = window
+        }
+
+        // Hide the floating toolbar and camera while the editor is open
+        toolbarPanel?.orderOut(nil)
+        cameraPanel?.orderOut(nil)
+
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === editorWindow else { return }
+        guard !recorder.isRecording else { return }
+        toolbarPanel?.makeKeyAndOrderFront(nil)
     }
 
     private func updateToolbarFrame(isRecording: Bool) {
@@ -109,8 +158,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let y = visible.minY + 24
             newFrame = NSRect(x: x, y: y, width: width, height: height)
         } else {
-            let width: CGFloat = 860
-            let height: CGFloat = 68
+            let width: CGFloat = 940
+            let height: CGFloat = 118
             let x = visible.midX - width / 2
             let y = visible.minY + 24
             newFrame = NSRect(x: x, y: y, width: width, height: height)

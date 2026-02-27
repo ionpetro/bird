@@ -5,11 +5,13 @@ final class FloatingPanel: NSPanel {
     init<V: View>(contentView: V) {
         let hosting = NSHostingView(rootView: contentView)
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 860, height: 68),
+            contentRect: NSRect(x: 0, y: 0, width: 940, height: 118),
             styleMask: [.nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
+        hosting.wantsLayer = true
+        hosting.layer?.backgroundColor = CGColor.clear
         self.contentView = hosting
         isFloatingPanel = true
         level = .floating
