@@ -76,10 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .sink { [weak self] isRecording in
                 guard let self else { return }
                 self.updateToolbarFrame(isRecording: isRecording)
-                // Hide the camera bubble while recording to avoid capturing it twice
-                if isRecording {
-                    self.cameraPanel?.orderOut(nil)
-                } else if self.recorder.captureCamera {
+                if self.recorder.captureCamera {
                     self.cameraPanel?.orderFront(nil)
                 }
             }
@@ -89,7 +86,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] captureCamera in
                 guard let self else { return }
-                guard !self.recorder.isRecording else { return }
                 if captureCamera {
                     self.cameraPanel?.orderFront(nil)
                 } else {
@@ -159,7 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             newFrame = NSRect(x: x, y: y, width: width, height: height)
         } else {
             let width: CGFloat = 940
-            let height: CGFloat = 118
+            let height: CGFloat = 58
             let x = visible.midX - width / 2
             let y = visible.minY + 24
             newFrame = NSRect(x: x, y: y, width: width, height: height)

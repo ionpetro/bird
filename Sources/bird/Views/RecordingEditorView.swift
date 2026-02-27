@@ -207,49 +207,55 @@ struct RecordingEditorView: View {
 
     private var timelineBar: some View {
         VStack(spacing: 0) {
+            // Track area
             GeometryReader { geo in
                 let w   = geo.size.width
                 let dur = max(durationSeconds, 0.1)
 
                 ZStack(alignment: .leading) {
-                    // Track
-                    Color.accentColor.opacity(0.75)
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                    // Thin center rail
+                    Rectangle()
+                        .fill(Color.white.opacity(0.07))
+                        .frame(height: 2)
+                        .frame(maxWidth: .infinity)
+                        .frame(maxHeight: .infinity)
 
-                    // Out-of-trim darkening
+                    // Active region (between trim points)
                     let inX  = w * CGFloat(trimStartSeconds / dur)
-                    let outX = w * CGFloat(trimEndSeconds / dur)
-                    if inX > 0 {
-                        Rectangle().fill(Color.black.opacity(0.5)).frame(width: inX)
-                            .clipShape(UnevenRoundedRectangle(topLeadingRadius: 5, bottomLeadingRadius: 5,
-                                                              bottomTrailingRadius: 0, topTrailingRadius: 0))
-                    }
-                    if outX < w {
-                        Rectangle().fill(Color.black.opacity(0.5)).frame(width: w - outX)
-                            .offset(x: outX)
-                            .clipShape(UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0,
-                                                              bottomTrailingRadius: 5, topTrailingRadius: 5))
-                    }
+                    let outX = w * CGFloat(trimEndSeconds   / dur)
+                    Rectangle()
+                        .fill(Color.white.opacity(0.13))
+                        .frame(height: 2)
+                        .frame(width: max(0, outX - inX))
+                        .frame(maxHeight: .infinity)
+                        .offset(x: inX)
 
-                    // Keyframe markers
+                    // Keyframe tick marks
                     if let kfs = project?.zoomKeyframes {
                         ForEach(kfs) { kf in
                             let kx = w * CGFloat(kf.startSeconds / dur)
-                            let kw = max(4, w * CGFloat(kf.durationSeconds / dur))
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(Color.white.opacity(selectedKeyframeID == kf.id ? 0.35 : 0.18))
-                                .frame(width: kw).padding(.vertical, 5)
+                            Rectangle()
+                                .fill(Color.accentColor.opacity(selectedKeyframeID == kf.id ? 0.9 : 0.5))
+                                .frame(width: 2, height: 14)
+                                .frame(maxHeight: .infinity)
                                 .offset(x: kx)
                                 .onTapGesture { selectedKeyframeID = kf.id; seek(to: kf.startSeconds) }
                         }
                     }
 
                     // Playhead
-                    let px = max(0, min(w * CGFloat(currentSeconds / dur), w - 2))
-                    Group {
-                        Rectangle().fill(.white).frame(width: 2).offset(x: px)
-                        Circle().fill(.white).frame(width: 12).offset(x: px - 5, y: -13)
-                    }
+                    let px = max(0, min(w * CGFloat(currentSeconds / dur), w - 1))
+                    Rectangle()
+                        .fill(Color.white)
+                        .frame(width: 1)
+                        .frame(maxHeight: .infinity)
+                        .offset(x: px)
+
+                    // Playhead handle (top diamond/circle)
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 8, height: 8)
+                        .offset(x: px - 3.5, y: -(geo.size.height / 2) + 4)
                 }
                 .contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0).onChanged { v in
@@ -258,19 +264,28 @@ struct RecordingEditorView: View {
                     seek(to: currentSeconds)
                 })
             }
-            .frame(height: 36)
-            .padding(.horizontal, 16).padding(.top, 10)
+            .frame(height: 44)
+            .padding(.horizontal, 16)
 
-            // Trim handles
-            HStack(spacing: 8) {
-                Text("In").font(.system(size: 10)).foregroundColor(.secondary)
-                Slider(value: $trimStartSeconds, in: 0...max(trimEndSeconds - 0.1, 0.1)).frame(maxWidth: 180)
-                Text(fmt(trimStartSeconds)).font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
+            Divider().opacity(0.12)
+
+            // Hint + trim controls
+            HStack(spacing: 6) {
+                Text("edits on").font(.system(size: 10, weight: .medium)).foregroundColor(.accentColor)
+                Text("(shift+tab to cycle)").font(.system(size: 10)).foregroundColor(.secondary)
+
                 Spacer()
-                Text(fmt(trimEndSeconds)).font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
+
+                Text("In").font(.system(size: 10)).foregroundColor(.secondary)
+                Slider(value: $trimStartSeconds, in: 0...max(trimEndSeconds - 0.1, 0.1)).frame(maxWidth: 140)
+                Text(fmt(trimStartSeconds)).font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary).frame(width: 36)
+
+                Rectangle().fill(Color.primary.opacity(0.10)).frame(width: 0.5, height: 12)
+
+                Text(fmt(trimEndSeconds)).font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary).frame(width: 36)
                 Slider(value: $trimEndSeconds,
                        in: min(trimStartSeconds + 0.1, durationSeconds)...max(durationSeconds, trimStartSeconds + 0.1))
-                    .frame(maxWidth: 180)
+                    .frame(maxWidth: 140)
                 Text("Out").font(.system(size: 10)).foregroundColor(.secondary)
             }
             .padding(.horizontal, 16).padding(.vertical, 8)

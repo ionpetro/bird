@@ -5,14 +5,28 @@ final class FloatingPanel: NSPanel {
     init<V: View>(contentView: V) {
         let hosting = NSHostingView(rootView: contentView)
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 940, height: 118),
+            contentRect: NSRect(x: 0, y: 0, width: 940, height: 58),
             styleMask: [.nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 940, height: 58))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = CGColor.clear
+
+        hosting.translatesAutoresizingMaskIntoConstraints = false
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = CGColor.clear
-        self.contentView = hosting
+        container.addSubview(hosting)
+        NSLayoutConstraint.activate([
+            hosting.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            hosting.topAnchor.constraint(equalTo: container.topAnchor),
+            hosting.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+
+        self.contentView = container
         isFloatingPanel = true
         level = .floating
         isMovableByWindowBackground = true

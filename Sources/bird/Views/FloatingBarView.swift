@@ -50,7 +50,7 @@ struct FloatingBarView: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 7)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(glassPanel)
         .clipShape(RoundedRectangle(cornerRadius: 20))
@@ -71,6 +71,7 @@ struct FloatingBarView: View {
             quitButton
             sep
             sourceSegment
+            sourceMenu.pointerCursor()
             sep
             cameraMenu.pointerCursor()
             micMenu.pointerCursor()
@@ -80,6 +81,27 @@ struct FloatingBarView: View {
             Spacer()
             recordButton
         }
+    }
+
+    private var sourceMenu: some View {
+        Menu {
+            if recorder.availableSources.isEmpty {
+                Button("No Sources Found") {}
+                    .disabled(true)
+            } else {
+                Picker("Source", selection: $recorder.selectedSourceID) {
+                    ForEach(recorder.availableSources) { source in
+                        Text(source.label).tag(source.id)
+                    }
+                }
+            }
+            Divider()
+            Button("Refresh Sources") { Task { await recorder.reloadSources() } }
+        } label: {
+            controlChip(icon: "display", label: truncated(selectedSourceLabel, max: 28), active: true)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
     }
 
     // MARK: – Quit
@@ -176,6 +198,10 @@ struct FloatingBarView: View {
             controlChip(icon: "slider.horizontal.3", label: presetName, active: true)
         }
         .menuStyle(.borderlessButton).fixedSize()
+    }
+
+    private var selectedSourceLabel: String {
+        recorder.availableSources.first(where: { $0.id == recorder.selectedSourceID })?.label ?? "Select Source"
     }
 
     private func controlChip(icon: String, label: String, active: Bool) -> some View {

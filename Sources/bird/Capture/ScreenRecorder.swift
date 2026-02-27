@@ -37,13 +37,13 @@ final class ScreenRecorder: NSObject, ObservableObject {
 
     private var stream: SCStream?
     private var streamOutput: ScreenStreamOutputHandler?
-    private var outputQueue = DispatchQueue(label: "screen.stream.output.queue")
+    private var outputQueue = DispatchQueue(label: "screen.stream.output.queue", qos: .userInteractive)
 
     private var assetWriter: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
+    private var videoAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var systemAudioInput: AVAssetWriterInput?
     private var micAudioInput: AVAssetWriterInput?
-    private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var writerStartTime: CMTime?
     private var outputURL: URL?
     private var captureSessionStartedAt: Date?
@@ -64,7 +64,6 @@ final class ScreenRecorder: NSObject, ObservableObject {
     let cameraManager = CameraManager()
     private let microphoneManager = MicrophoneManager()
 
-    private let ciContext = CIContext()
     private var lastPreviewUpdate: CFAbsoluteTime = 0
 
     override init() {
@@ -302,29 +301,23 @@ final class ScreenRecorder: NSObject, ObservableObject {
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: width * height * 6,
+                AVVideoAverageBitRateKey: max(width * height * preset.bitRateMultiplier, 2_000_000),
+                AVVideoExpectedSourceFrameRateKey: preset.frameRate,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
             ]
         ]
 
-        let computedBitrate = max(width * height * preset.bitRateMultiplier, 2_000_000)
-        var compression = (videoSettings[AVVideoCompressionPropertiesKey] as? [String: Any]) ?? [:]
-        compression[AVVideoAverageBitRateKey] = computedBitrate
-        compression[AVVideoExpectedSourceFrameRateKey] = preset.frameRate
-
-        var finalVideoSettings = videoSettings
-        finalVideoSettings[AVVideoCompressionPropertiesKey] = compression
-
-        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: finalVideoSettings)
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
 
-        let attributes: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
-            kCVPixelBufferWidthKey as String: width,
-            kCVPixelBufferHeightKey as String: height,
-            kCVPixelBufferMetalCompatibilityKey as String: true
-        ]
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput, sourcePixelBufferAttributes: attributes)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: videoInput,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height
+            ]
+        )
 
         guard writer.canAdd(videoInput) else {
             throw CaptureError.writerConfiguration("Video settings are not supported for \(preset.format.rawValue)")
@@ -353,7 +346,7 @@ final class ScreenRecorder: NSObject, ObservableObject {
 
         self.assetWriter = writer
         self.videoInput = videoInput
-        self.adaptor = adaptor
+        self.videoAdaptor = adaptor
         writerStartTime = nil
         isWriting = true
     }
@@ -409,16 +402,10 @@ final class ScreenRecorder: NSObject, ObservableObject {
     }
 
     private func handleScreenSample(_ sampleBuffer: CMSampleBuffer) {
+        guard let videoAdaptor, let videoInput, videoInput.isReadyForMoreMediaData else { return }
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        guard let adaptor, let videoInput else { return }
-        guard videoInput.isReadyForMoreMediaData else { return }
-
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-
-        let cameraBuffer = captureCamera ? cameraManager.latestFrame()?.0 : nil
-        guard let pixelBuffer = makeCompositedBuffer(screenBuffer: imageBuffer, cameraBuffer: cameraBuffer) else { return }
-        adaptor.append(pixelBuffer, withPresentationTime: timestamp)
-
+        videoAdaptor.append(imageBuffer, withPresentationTime: timestamp)
         updatePreviewIfNeeded(from: imageBuffer)
     }
 
@@ -432,66 +419,16 @@ final class ScreenRecorder: NSObject, ObservableObject {
         micAudioInput.append(sampleBuffer)
     }
 
-    private func makeCompositedBuffer(screenBuffer: CVPixelBuffer, cameraBuffer: CVPixelBuffer?) -> CVPixelBuffer? {
-        guard let adaptor, let pool = adaptor.pixelBufferPool else { return nil }
-
-        var outputBuffer: CVPixelBuffer?
-        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &outputBuffer)
-        guard let outputBuffer else { return nil }
-
-        let screenImage = CIImage(cvPixelBuffer: screenBuffer)
-        var composed = screenImage
-
-        if let cameraBuffer {
-            let cameraImage = CIImage(cvPixelBuffer: cameraBuffer)
-
-            let screenExtent = screenImage.extent
-            let overlayWidth = screenExtent.width * 0.22
-            let scale = overlayWidth / cameraImage.extent.width
-            let scaledCamera = cameraImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            let margin: CGFloat = 24
-            let x = screenExtent.maxX - scaledCamera.extent.width - margin
-            let y = screenExtent.minY + margin
-
-            // Circular mask via CIRadialGradient
-            let extent = scaledCamera.extent
-            let radius = min(extent.width, extent.height) / 2
-            let center = CIVector(x: extent.midX, y: extent.midY)
-            let circularCamera: CIImage
-            if let gradientFilter = CIFilter(name: "CIRadialGradient") {
-                gradientFilter.setValue(center, forKey: "inputCenter")
-                gradientFilter.setValue(radius - 1, forKey: "inputRadius0")
-                gradientFilter.setValue(radius,     forKey: "inputRadius1")
-                gradientFilter.setValue(CIColor.white, forKey: "inputColor0")
-                gradientFilter.setValue(CIColor.clear, forKey: "inputColor1")
-                let mask = gradientFilter.outputImage!.cropped(to: extent)
-                circularCamera = scaledCamera.applyingFilter("CIBlendWithMask", parameters: [
-                    "inputBackgroundImage": CIImage(color: .clear).cropped(to: extent),
-                    "inputMaskImage": mask
-                ])
-            } else {
-                circularCamera = scaledCamera
-            }
-
-            let positionedCamera = circularCamera.transformed(by: CGAffineTransform(translationX: x, y: y))
-            composed = positionedCamera.composited(over: screenImage)
-        }
-
-        ciContext.render(composed, to: outputBuffer)
-        return outputBuffer
-    }
-
     private func updatePreviewIfNeeded(from imageBuffer: CVPixelBuffer) {
         let now = CFAbsoluteTimeGetCurrent()
-        guard now - lastPreviewUpdate > 0.25 else { return }
+        guard now - lastPreviewUpdate > 0.5 else { return }
         lastPreviewUpdate = now
 
         let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
         let nsImage = NSImage(cgImage: cgImage, size: .zero)
-        DispatchQueue.main.async {
-            self.previewImage = nsImage
-        }
+        DispatchQueue.main.async { self.previewImage = nsImage }
     }
 
     private func finishWriting() async {
@@ -514,9 +451,9 @@ final class ScreenRecorder: NSObject, ObservableObject {
 
         assetWriter = nil
         videoInput = nil
+        videoAdaptor = nil
         systemAudioInput = nil
         micAudioInput = nil
-        adaptor = nil
     }
 
     private func autoSaveURL(for preset: ExportPreset) throws -> URL {
